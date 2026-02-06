@@ -1,0 +1,25 @@
+# OpenAlgo Environment Configuration - US Markets
+# Copy this file to .env and fill in your credentials
+
+SECRET_KEY=change_this_to_a_random_secret_key
+FLASK_ENV=production
+FLASK_DEBUG=0
+DATABASE_URL=sqlite:///db/openalgo.db
+
+API_RATE_LIMIT=50 per second
+WEBHOOK_RATE_LIMIT=100 per minute
+LOGIN_RATE_LIMIT=5 per minute
+
+# Interactive Brokers
+IB_GATEWAY_HOST=127.0.0.1
+IB_GATEWAY_PORT=7497
+IB_CLIENT_ID=1
+
+# Alpaca
+ALPACA_API_KEY=your_alpaca_api_key_here
+ALPACA_API_SECRET=your_alpaca_api_secret_here
+ALPACA_BASE_URL=https://paper-api.alpaca.markets
+ALPACA_DATA_URL=https://data.alpaca.markets
+
+# Polygon.io
+POLYGON_API_KEY=your_polygon_api_key_here

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  openalgo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openalgo-us
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+      - "8765:8765"
+    environment:
+      - DATABASE_URL=sqlite:///db/openalgo.db
+      - FLASK_ENV=production
+      - FLASK_DEBUG=0
+      - SECRET_KEY=change_this_secret_key
+      - IB_GATEWAY_HOST=host.docker.internal
+      - IB_GATEWAY_PORT=7497
+      - IB_CLIENT_ID=1
+      - ALPACA_API_KEY=your_key_here
+      - ALPACA_API_SECRET=your_secret_here
+      - ALPACA_BASE_URL=https://paper-api.alpaca.markets
+      - POLYGON_API_KEY=your_polygon_key
+      - API_RATE_LIMIT=50 per second
+    volumes:
+      - ./db:/app/db
+      - ./log:/app/log
+      - ./strategies:/app/strategies
+    networks:
+      - openalgo-network
+
+networks:
+  openalgo-network:
+    driver: bridge

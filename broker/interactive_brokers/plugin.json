@@ -1,0 +1,8 @@
+{
+  "Plugin Name": "interactive_brokers",
+  "Plugin URI": "https://openalgo.in",
+  "Description": "Interactive Brokers OpenAlgo Plugin - US Markets",
+  "Version": "1.0",
+  "Author": "OpenAlgo Community",
+  "Author URI": "https://openalgo.in"
+}
