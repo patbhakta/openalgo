@@ -429,6 +429,45 @@ done
 
 log "\n=== Starting Deployment ===" "$BLUE"
 
+# Calculate dynamic resource limits based on system specs and number of instances
+TOTAL_RAM_MB=$(($(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024))
+CPU_CORES=$(nproc 2>/dev/null || echo 2)
+NUM_INSTANCES=${#CONF_DOMAINS[@]}
+
+# Calculate per-instance RAM (divide total by number of instances)
+RAM_PER_INSTANCE=$((TOTAL_RAM_MB / NUM_INSTANCES))
+log "System: ${TOTAL_RAM_MB}MB RAM, ${CPU_CORES} cores, ${NUM_INSTANCES} instances" "$BLUE"
+log "Per-instance allocation: ~${RAM_PER_INSTANCE}MB" "$BLUE"
+
+# shm_size: 25% of per-instance RAM (min 128MB, max 1GB for multi-instance)
+SHM_SIZE_MB=$((RAM_PER_INSTANCE / 4))
+[ $SHM_SIZE_MB -lt 128 ] && SHM_SIZE_MB=128
+[ $SHM_SIZE_MB -gt 1024 ] && SHM_SIZE_MB=1024
+
+# Thread limits based on per-instance RAM (conservative)
+# <2GB: 1 thread | 2-4GB: 2 threads | 4GB+: max(2, min(4, cores/instances))
+if [ $RAM_PER_INSTANCE -lt 2000 ]; then
+    THREAD_LIMIT=1
+elif [ $RAM_PER_INSTANCE -lt 4000 ]; then
+    THREAD_LIMIT=2
+else
+    CORES_PER_INSTANCE=$((CPU_CORES / NUM_INSTANCES))
+    THREAD_LIMIT=$((CORES_PER_INSTANCE < 2 ? 2 : CORES_PER_INSTANCE))
+    [ $THREAD_LIMIT -gt 4 ] && THREAD_LIMIT=4
+fi
+
+# Strategy memory limit based on per-instance RAM
+# <2GB: 256MB | 2-4GB: 512MB | 4GB+: 1024MB
+if [ $RAM_PER_INSTANCE -lt 2000 ]; then
+    STRATEGY_MEM_LIMIT=256
+elif [ $RAM_PER_INSTANCE -lt 4000 ]; then
+    STRATEGY_MEM_LIMIT=512
+else
+    STRATEGY_MEM_LIMIT=1024
+fi
+
+log "Config: shm=${SHM_SIZE_MB}MB, threads=${THREAD_LIMIT}, strategy_mem=${STRATEGY_MEM_LIMIT}MB" "$BLUE"
+
 # Base Dir
 mkdir -p "$INSTALL_BASE"
 chmod 755 "$INSTALL_BASE"
@@ -755,10 +794,30 @@ for i in "${!CONF_DOMAINS[@]}"; do
         # Only update connectivity settings if needed (in case domain changed)
         # These are safe to update without breaking authentication
         sed -i "s|WEBSOCKET_URL='.*'|WEBSOCKET_URL='wss://$DOMAIN/ws'|g" "$ENV_FILE"
-        sed -i "s|CORS_ALLOWED_ORIGINS = '.*'|CORS_ALLOWED_ORIGINS = 'https://$DOMAIN'|g" "$ENV_FILE"
-        sed -i "s|CSP_CONNECT_SRC = \"'self'.*\"|CSP_CONNECT_SRC = \"'self' wss://$DOMAIN https://$DOMAIN wss: ws: https://cdn.socket.io\"|g" "$ENV_FILE"
         
-        log "Updated connectivity settings only" "$GREEN"
+        # CORS: Add domain if not already present (preserves custom domains like chart.domain.com)
+        # NOTE: Flask-CORS expects comma-separated origins (see cors.py line 25)
+        if ! grep "CORS_ALLOWED_ORIGINS" "$ENV_FILE" | grep -q "https://$DOMAIN"; then
+            # Extract current CORS value and append new domain with comma
+            CURRENT_CORS=$(grep "CORS_ALLOWED_ORIGINS" "$ENV_FILE" | sed "s/.*= '\\(.*\\)'/\\1/")
+            if [ -n "$CURRENT_CORS" ]; then
+                NEW_CORS="$CURRENT_CORS,https://$DOMAIN"
+                # Remove duplicates while preserving comma format
+                NEW_CORS=$(echo "$NEW_CORS" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+                sed -i "s|CORS_ALLOWED_ORIGINS = '.*'|CORS_ALLOWED_ORIGINS = '$NEW_CORS'|g" "$ENV_FILE"
+            fi
+        fi
+        
+        # CSP: Add domain if not already present (preserves custom domains)
+        if ! grep "CSP_CONNECT_SRC" "$ENV_FILE" | grep -q "https://$DOMAIN"; then
+            CURRENT_CSP=$(grep "CSP_CONNECT_SRC" "$ENV_FILE" | sed 's/.*= "\\(.*\\)"/\\1/')
+            if [ -n "$CURRENT_CSP" ] && ! echo "$CURRENT_CSP" | grep -q "https://$DOMAIN"; then
+                NEW_CSP="$CURRENT_CSP https://$DOMAIN wss://$DOMAIN"
+                sed -i "s|CSP_CONNECT_SRC = \".*\"|CSP_CONNECT_SRC = \"$NEW_CSP\"|g" "$ENV_FILE"
+            fi
+        fi
+        
+        log "Updated connectivity settings (preserved custom domains)" "$GREEN"
     else
         log "Creating new .env configuration..." "$YELLOW"
         cp "$INSTANCE_DIR/.sample.env" "$ENV_FILE"
@@ -804,33 +863,43 @@ services:
       - "127.0.0.1:${WS_PORT}:8765"
     volumes:
       - openalgo_db:/app/db
-      - openalgo_logs:/app/logs
       - openalgo_log:/app/log
       - openalgo_strategies:/app/strategies
       - openalgo_keys:/app/keys
+      - openalgo_tmp:/app/tmp
       - ./.env:/app/.env:ro
     environment:
       - FLASK_ENV=production
       - FLASK_DEBUG=0
       - APP_MODE=standalone
       - TZ=Asia/Kolkata
+      # Resource limits auto-calculated for multi-instance deployment
+      # See: https://github.com/marketcalls/openalgo/issues/822
+      - OPENBLAS_NUM_THREADS=${THREAD_LIMIT}
+      - OMP_NUM_THREADS=${THREAD_LIMIT}
+      - MKL_NUM_THREADS=${THREAD_LIMIT}
+      - NUMEXPR_NUM_THREADS=${THREAD_LIMIT}
+      - NUMBA_NUM_THREADS=${THREAD_LIMIT}
+      - STRATEGY_MEMORY_LIMIT_MB=${STRATEGY_MEM_LIMIT}
+    shm_size: '${SHM_SIZE_MB}m'
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/login"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/auth/check-setup"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
     restart: unless-stopped
 
 volumes:
   openalgo_db:
-    driver: local
-  openalgo_logs:
     driver: local
   openalgo_log:
     driver: local
   openalgo_strategies:
     driver: local
   openalgo_keys:
+    driver: local
+  openalgo_tmp:
     driver: local
 EOF
 
@@ -917,6 +986,7 @@ EOF
     
     # 8. Service Start
     log "Starting Container for $DOMAIN..." "$BLUE"
+    log "Building Docker image (includes automated frontend build, may take 2-5 minutes)..." "$YELLOW"
     cd "$INSTANCE_DIR"
     docker compose build
     docker compose up -d

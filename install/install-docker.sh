@@ -272,14 +272,63 @@ $SUDO sed -i "s|WEBSOCKET_URL='.*'|WEBSOCKET_URL='wss://$DOMAIN/ws'|g" .env
 $SUDO sed -i "s|WEBSOCKET_HOST='127.0.0.1'|WEBSOCKET_HOST='0.0.0.0'|g" .env
 $SUDO sed -i "s|ZMQ_HOST='127.0.0.1'|ZMQ_HOST='0.0.0.0'|g" .env
 $SUDO sed -i "s|FLASK_HOST_IP='127.0.0.1'|FLASK_HOST_IP='0.0.0.0'|g" .env
-$SUDO sed -i "s|CORS_ALLOWED_ORIGINS = '.*'|CORS_ALLOWED_ORIGINS = 'https://$DOMAIN'|g" .env
-$SUDO sed -i "s|CSP_CONNECT_SRC = \"'self'.*\"|CSP_CONNECT_SRC = \"'self' wss://$DOMAIN https://$DOMAIN wss: ws: https://cdn.socket.io\"|g" .env
+# CORS: Add domain if not already present (preserves custom domains)
+# NOTE: Flask-CORS expects comma-separated origins (see cors.py line 25)
+if ! grep "CORS_ALLOWED_ORIGINS" .env | grep -q "https://$DOMAIN"; then
+    CURRENT_CORS=$(grep "CORS_ALLOWED_ORIGINS" .env | sed "s/.*= '\\(.*\\)'/\\1/")
+    if [ -n "$CURRENT_CORS" ]; then
+        NEW_CORS="$CURRENT_CORS,https://$DOMAIN"
+        NEW_CORS=$(echo "$NEW_CORS" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+        $SUDO sed -i "s|CORS_ALLOWED_ORIGINS = '.*'|CORS_ALLOWED_ORIGINS = '$NEW_CORS'|g" .env
+    fi
+fi
+
+# CSP: Add domain if not already present (preserves custom domains)
+if ! grep "CSP_CONNECT_SRC" .env | grep -q "https://$DOMAIN"; then
+    CURRENT_CSP=$(grep "CSP_CONNECT_SRC" .env | sed 's/.*= "\\(.*\\)"/\\1/')
+    if [ -n "$CURRENT_CSP" ] && ! echo "$CURRENT_CSP" | grep -q "https://$DOMAIN"; then
+        NEW_CSP="$CURRENT_CSP https://$DOMAIN wss://$DOMAIN"
+        $SUDO sed -i "s|CSP_CONNECT_SRC = \".*\"|CSP_CONNECT_SRC = \"$NEW_CSP\"|g" .env
+    fi
+fi
 
 check_status "Environment configuration failed"
 
+# Calculate dynamic resource limits based on system specs
+TOTAL_RAM_MB=$(($(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024))
+CPU_CORES=$(nproc 2>/dev/null || echo 2)
+
+# shm_size: 25% of RAM (min 256MB, max 2GB)
+SHM_SIZE_MB=$((TOTAL_RAM_MB / 4))
+[ $SHM_SIZE_MB -lt 256 ] && SHM_SIZE_MB=256
+[ $SHM_SIZE_MB -gt 2048 ] && SHM_SIZE_MB=2048
+
+# Thread limits based on RAM (conservative for strategy subprocess compatibility)
+# 2GB: 1 thread | 4GB: 2 threads | 8GB+: min(4, cores)
+if [ $TOTAL_RAM_MB -lt 3000 ]; then
+    THREAD_LIMIT=1
+elif [ $TOTAL_RAM_MB -lt 6000 ]; then
+    THREAD_LIMIT=2
+else
+    THREAD_LIMIT=$((CPU_CORES < 4 ? CPU_CORES : 4))
+fi
+
+# Strategy memory limit based on RAM
+# 2GB: 256MB | 4GB: 512MB | 8GB+: 1024MB
+if [ $TOTAL_RAM_MB -lt 3000 ]; then
+    STRATEGY_MEM_LIMIT=256
+elif [ $TOTAL_RAM_MB -lt 6000 ]; then
+    STRATEGY_MEM_LIMIT=512
+else
+    STRATEGY_MEM_LIMIT=1024
+fi
+
+log "System: ${TOTAL_RAM_MB}MB RAM, ${CPU_CORES} cores" "$BLUE"
+log "Config: shm=${SHM_SIZE_MB}MB, threads=${THREAD_LIMIT}, strategy_mem=${STRATEGY_MEM_LIMIT}MB" "$BLUE"
+
 # Create docker-compose.yaml
 log "\n=== Creating Docker Compose Configuration ===" "$BLUE"
-$SUDO tee docker-compose.yaml > /dev/null << 'EOF'
+$SUDO tee docker-compose.yaml > /dev/null << EOF
 services:
   openalgo:
     image: openalgo:latest
@@ -296,19 +345,31 @@ services:
     # Use named volumes to avoid permission issues with non-root container user
     volumes:
       - openalgo_db:/app/db
-      - openalgo_logs:/app/logs
       - openalgo_log:/app/log
       - openalgo_strategies:/app/strategies
       - openalgo_keys:/app/keys
+      - openalgo_tmp:/app/tmp
       - ./.env:/app/.env:ro
 
     environment:
       - FLASK_ENV=production
       - FLASK_DEBUG=0
       - APP_MODE=standalone
+      - TZ=Asia/Kolkata
+      # Resource limits auto-calculated based on system specs
+      # See: https://github.com/marketcalls/openalgo/issues/822
+      - OPENBLAS_NUM_THREADS=${THREAD_LIMIT}
+      - OMP_NUM_THREADS=${THREAD_LIMIT}
+      - MKL_NUM_THREADS=${THREAD_LIMIT}
+      - NUMEXPR_NUM_THREADS=${THREAD_LIMIT}
+      - NUMBA_NUM_THREADS=${THREAD_LIMIT}
+      - STRATEGY_MEMORY_LIMIT_MB=${STRATEGY_MEM_LIMIT}
+
+    # Shared memory for scipy/numba operations (auto-calculated: 25% of RAM)
+    shm_size: '${SHM_SIZE_MB}m'
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/auth/check-setup"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -320,13 +381,13 @@ services:
 volumes:
   openalgo_db:
     driver: local
-  openalgo_logs:
-    driver: local
   openalgo_log:
     driver: local
   openalgo_strategies:
     driver: local
   openalgo_keys:
+    driver: local
+  openalgo_tmp:
     driver: local
 EOF
 
@@ -591,7 +652,7 @@ check_status "Nginx reload failed"
 
 # Build and start Docker container
 log "\n=== Building Docker Image ===" "$BLUE"
-log "This may take several minutes..." "$YELLOW"
+log "Includes automated frontend build. This may take 2-5 minutes depending on your server..." "$YELLOW"
 sudo docker compose build
 check_status "Docker build failed"
 

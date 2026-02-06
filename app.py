@@ -34,6 +34,7 @@ from blueprints.flow import flow_bp  # Import the flow blueprint
 from blueprints.gc_json import gc_json_bp
 from blueprints.historify import historify_bp  # Import the historify blueprint
 from blueprints.latency import latency_bp  # Import the latency blueprint
+from blueprints.health import health_bp  # Import the health monitoring blueprint
 from blueprints.log import log_bp
 from blueprints.logging import logging_bp  # Import the logging blueprint
 from blueprints.master_contract_status import (
@@ -43,7 +44,7 @@ from blueprints.orders import orders_bp
 from blueprints.platforms import platforms_bp
 from blueprints.playground import playground_bp  # Import the API playground blueprint
 from blueprints.pnltracker import pnltracker_bp  # Import the pnl tracker blueprint
-from blueprints.python_strategy import python_strategy_bp  # Import the python strategy blueprint
+from blueprints.python_strategy import python_strategy_bp, initialize_with_app_context as init_python_strategy  # Import the python strategy blueprint
 from blueprints.react_app import (  # Import React frontend blueprint
     is_react_frontend_available,
     react_bp,
@@ -83,6 +84,7 @@ from limiter import limiter  # Import the Limiter instance
 from restx_api import api, api_v1_bp
 from services.telegram_bot_service import telegram_bot_service
 from utils.latency_monitor import init_latency_monitoring  # Import latency monitoring
+from utils.health_monitor import init_health_monitoring  # Import health monitoring
 from utils.logging import (  # Import centralized logging
     get_logger,
     highlight_url,
@@ -221,6 +223,7 @@ def create_app():
     app.register_blueprint(chartink_bp)
     app.register_blueprint(traffic_bp)
     app.register_blueprint(latency_bp)
+    app.register_blueprint(health_bp)  # Register Health monitoring blueprint
     app.register_blueprint(strategy_bp)
     app.register_blueprint(master_contract_status_bp)
     app.register_blueprint(websocket_bp)  # Register WebSocket example blueprint
@@ -251,8 +254,18 @@ def create_app():
         # Exempt logout endpoint from CSRF protection (safe - only destroys session)
         csrf.exempt(app.view_functions["auth.logout"])
 
+        # Exempt health check endpoints from CSRF (for AWS ELB, K8s probes)
+        csrf.exempt(app.view_functions["health_bp.simple_health"])
+        csrf.exempt(app.view_functions["health_bp.detailed_health_check"])
+
         # Initialize latency monitoring (after registering API blueprint)
         init_latency_monitoring(app)
+
+        # Initialize health monitoring (background daemon thread)
+        init_health_monitoring(app)
+
+        # NOTE: Python strategy scheduler is initialized in setup_environment()
+        # AFTER database tables are created, to avoid "no such table" errors on fresh install
 
         # Auto-start Telegram bot if it was active (non-blocking)
         try:
@@ -329,6 +342,7 @@ def create_app():
         if (
             request.path.startswith("/static/")
             or request.path.startswith("/api/")
+            or request.path.startswith("/assets/")  # React frontend assets
             or request.path
             in [
                 "/",
@@ -336,9 +350,12 @@ def create_app():
                 "/auth/reset-password",
                 "/auth/csrf-token",
                 "/auth/broker-config",
+                "/auth/session-status",  # Session status check for React SPA
+                "/auth/check-setup",  # Setup check for React SPA
                 "/setup",
                 "/download",
                 "/faq",
+                "/login",  # React login page
             ]
             or request.path.startswith("/auth/broker/")  # OAuth callbacks
             or request.path.startswith("/_reload-ws")
@@ -494,6 +511,14 @@ def setup_environment(app):
         db_init_time = (time.time() - db_init_start) * 1000
         logger.debug(f"All databases initialized in parallel ({db_init_time:.0f}ms)")
 
+        # Initialize Python strategy scheduler (registers cron jobs for scheduled strategies)
+        # This must be AFTER database initialization to avoid "no such table" errors
+        try:
+            init_python_strategy()
+            logger.debug("Python strategy scheduler initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Python strategy scheduler: {e}")
+
         # Initialize Flow scheduler
         try:
             from services.flow_scheduler_service import init_flow_scheduler
@@ -603,6 +628,41 @@ with app.app_context():
             logger.debug(f"Services started in parallel ({startup_time:.0f}ms)")
     except Exception as e:
         logger.error(f"Error checking analyzer mode on startup: {e}")
+
+# Database session cleanup (teardown handler)
+@app.teardown_appcontext
+def shutdown_database_sessions(exception=None):
+    """Remove scoped sessions after each request to prevent FD leaks"""
+    try:
+        from database.auth_db import db_session
+        db_session.remove()
+    except Exception as e:
+        logger.error(f"Error removing auth db_session: {e}")
+
+    try:
+        from database.traffic_db import logs_session
+        logs_session.remove()
+    except Exception as e:
+        logger.error(f"Error removing logs_session: {e}")
+
+    try:
+        from database.apilog_db import db_session as apilog_session
+        apilog_session.remove()
+    except Exception as e:
+        logger.error(f"Error removing apilog_session: {e}")
+
+    try:
+        from database.latency_db import latency_session
+        latency_session.remove()
+    except Exception as e:
+        logger.error(f"Error removing latency_session: {e}")
+
+    try:
+        from database.health_db import health_session
+        health_session.remove()
+    except Exception as e:
+        logger.error(f"Error removing health_session: {e}")
+
 
 # Integrate the WebSocket proxy server with the Flask app
 # Check if running in Docker (standalone mode) or local (integrated mode)

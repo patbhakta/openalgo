@@ -130,7 +130,7 @@ def _create_http_client() -> httpx.Client:
 
                 logger.debug(f"Request completed in {duration_ms:.2f}ms")
         except Exception as e:
-            logger.error(f"Error in response hook: {e}")
+            logger.exception(f"Error in response hook: {e}")
 
     try:
         # Detect if running in standalone mode (Docker/production) vs integrated mode (local dev)
@@ -146,9 +146,9 @@ def _create_http_client() -> httpx.Client:
             http1=True,  # Always enable HTTP/1.1 for compatibility
             timeout=120.0,  # Increased timeout for large historical data requests
             limits=httpx.Limits(
-                max_keepalive_connections=20,  # Balanced for most broker APIs
-                max_connections=50,  # Reasonable max without overloading
-                keepalive_expiry=120.0,  # 2 minutes - good balance
+                max_keepalive_connections=40,  # Increased from 20 for multi-strategy environments
+                max_connections=100,  # Increased from 50 for 10+ concurrent strategies
+                keepalive_expiry=30.0,  # Reduced from 120s to recycle stale connections faster
             ),
             # Add verify parameter to handle SSL/TLS issues in standalone mode
             verify=True,  # Can be set to False for debugging SSL issues (not recommended for production)
@@ -164,7 +164,7 @@ def _create_http_client() -> httpx.Client:
         return client
 
     except Exception as e:
-        logger.error(f"Failed to create HTTP client: {e}")
+        logger.exception(f"Failed to create HTTP client: {e}")
         raise
 
 

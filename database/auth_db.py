@@ -196,12 +196,17 @@ def decrypt_token(encrypted_token):
     try:
         return fernet.decrypt(encrypted_token.encode()).decode()
     except Exception as e:
-        logger.error(f"Error decrypting token: {e}")
+        logger.exception(f"Error decrypting token: {e}")
         return None
 
 
 def upsert_auth(name, auth_token, broker, feed_token=None, user_id=None, revoke=False):
-    """Store encrypted auth token and feed token if provided"""
+    """Store encrypted auth token and feed token if provided.
+
+    Also publishes cache invalidation events via ZeroMQ for multi-process deployments.
+    This ensures WebSocket proxy and other processes clear their stale cached tokens.
+    See GitHub issue #765 for details on the cross-process cache synchronization problem.
+    """
     encrypted_token = encrypt_token(auth_token)
     encrypted_feed_token = encrypt_token(feed_token) if feed_token else None
 
@@ -224,35 +229,65 @@ def upsert_auth(name, auth_token, broker, feed_token=None, user_id=None, revoke=
         db_session.add(auth_obj)
     db_session.commit()
 
-    # Update cache after successful database operation
-    cache_key_auth = f"auth-{name}"
-    cache_key_feed = f"feed-{name}"
+    # CRITICAL: Clear ENTIRE auth_cache on token update to prevent stale token issues
+    # This is necessary because get_auth_token_broker() uses a different cache key format
+    # (sha256(api_key)_include_feed_token) than upsert_auth() uses (auth-{name}).
+    # Without clearing all entries, old cached tokens from get_auth_token_broker()
+    # would persist and cause 401 Unauthorized errors after re-login.
+    # See GitHub issue #851 for details on this cache key mismatch bug.
+    auth_cache.clear()
+    feed_token_cache.clear()
+    broker_cache.clear()  # Also clear broker cache to ensure fresh data
+    logger.info(f"Cleared all auth caches after token update for user: {name}")
 
-    if revoke:
-        # Clear cache entries when revoking
-        if cache_key_auth in auth_cache:
-            del auth_cache[cache_key_auth]
-        if cache_key_feed in feed_token_cache:
-            del feed_token_cache[cache_key_feed]
-        logger.info(f"Cleared cache entries for revoked tokens of user: {name}")
-    else:
-        # Populate cache immediately on login/update for faster subsequent access
-        auth_cache[cache_key_auth] = auth_obj
-        if auth_obj.feed_token:
-            feed_token_cache[cache_key_feed] = auth_obj
-        logger.debug(f"Auth cache populated for user: {name}")
+    # Publish cache invalidation event via ZeroMQ for other processes
+    # This notifies WebSocket proxy and other processes to clear their stale caches
+    try:
+        from database.cache_invalidation import publish_all_cache_invalidation
+        publish_all_cache_invalidation(name)
+        logger.debug(f"Published cache invalidation for user: {name}")
+    except Exception as e:
+        # Don't fail auth operation if cache invalidation fails
+        # The database fallback in other processes will handle it
+        logger.warning(f"Failed to publish cache invalidation for user {name}: {e}")
 
     return auth_obj.id
 
 
-def get_auth_token(name):
-    """Get decrypted auth token"""
+def get_auth_token(name, bypass_cache: bool = False):
+    """Get decrypted auth token.
+
+    Args:
+        name: The user identifier to get the token for
+        bypass_cache: If True, skip the cache and query the database directly.
+                     Use this when retrying after a 403 error to get fresh credentials.
+                     See GitHub issue #765 for details.
+
+    Returns:
+        The decrypted auth token, or None if not found/revoked
+    """
     # Handle None or empty name gracefully
     if not name:
         logger.debug("get_auth_token called with empty/None name, returning None")
         return None
 
     cache_key = f"auth-{name}"
+
+    # Bypass cache if requested (e.g., after 403 error for fresh token)
+    if bypass_cache:
+        logger.debug(f"Bypassing cache for user: {name} (fresh token requested)")
+        # Clear stale cache entry
+        if cache_key in auth_cache:
+            del auth_cache[cache_key]
+        # Query database directly
+        auth_obj = get_auth_token_dbquery(name)
+        if isinstance(auth_obj, Auth) and not auth_obj.is_revoked:
+            # Update cache with fresh data
+            auth_cache[cache_key] = auth_obj
+            return decrypt_token(auth_obj.auth)
+        return None
+
+    # Normal cache-first lookup
     if cache_key in auth_cache:
         auth_obj = auth_cache[cache_key]
         if isinstance(auth_obj, Auth) and not auth_obj.is_revoked:
@@ -266,6 +301,22 @@ def get_auth_token(name):
             auth_cache[cache_key] = auth_obj
             return decrypt_token(auth_obj.auth)
         return None
+
+
+def get_auth_token_fresh(name):
+    """Get fresh auth token directly from database, bypassing cache.
+
+    This is a convenience function for use after authentication failures (403 errors).
+    It clears the local cache and fetches the latest token from the database.
+    See GitHub issue #765 for details on when to use this.
+
+    Args:
+        name: The user identifier to get the token for
+
+    Returns:
+        The decrypted auth token, or None if not found/revoked
+    """
+    return get_auth_token(name, bypass_cache=True)
 
 
 def get_auth_token_dbquery(name):
@@ -284,7 +335,7 @@ def get_auth_token_dbquery(name):
                 logger.warning(f"No valid auth token found for name '{name}'.")
             return None
     except Exception as e:
-        logger.error(f"Error while querying the database for auth token: {e}")
+        logger.exception(f"Error while querying the database for auth token: {e}")
         return None
 
 
@@ -327,7 +378,7 @@ def get_feed_token_dbquery(name):
                 logger.warning(f"No valid feed token found for name '{name}'.")
             return None
     except Exception as e:
-        logger.error(f"Error while querying the database for feed token: {e}")
+        logger.exception(f"Error while querying the database for feed token: {e}")
         return None
 
 
@@ -346,7 +397,7 @@ def get_user_id(name):
                 logger.warning(f"No valid user_id found for name '{name}'.")
             return None
     except Exception as e:
-        logger.error(f"Error while querying the database for user_id: {e}")
+        logger.exception(f"Error while querying the database for user_id: {e}")
         return None
 
 
@@ -396,7 +447,7 @@ def get_api_key(user_id):
         api_key_obj = ApiKeys.query.filter_by(user_id=user_id).first()
         return api_key_obj is not None
     except Exception as e:
-        logger.error(f"Error while querying the database for API key: {e}")
+        logger.exception(f"Error while querying the database for API key: {e}")
         return None
 
 
@@ -408,7 +459,7 @@ def get_api_key_for_tradingview(user_id):
             return decrypt_token(api_key_obj.api_key_encrypted)
         return None
     except Exception as e:
-        logger.error(f"Error while querying the database for API key: {e}")
+        logger.exception(f"Error while querying the database for API key: {e}")
         return None
 
 
@@ -423,7 +474,7 @@ def get_first_available_api_key():
             return decrypt_token(api_key_obj.api_key_encrypted)
         return None
     except Exception as e:
-        logger.error(f"Error getting first available API key: {e}")
+        logger.exception(f"Error getting first available API key: {e}")
         return None
 
 
@@ -501,7 +552,7 @@ def verify_api_key(provided_api_key):
 
         return None
     except Exception as e:
-        logger.error(f"Error verifying API key: {e}")
+        logger.exception(f"Error verifying API key: {e}")
         return None
 
 
@@ -530,7 +581,7 @@ def get_broker_name(provided_api_key):
                 logger.warning(f"No valid broker found for user_id '{user_id}'.")
                 return None
         except Exception as e:
-            logger.error(f"Error while querying the database for broker name: {e}")
+            logger.exception(f"Error while querying the database for broker name: {e}")
             return None
     return None
 
@@ -566,7 +617,7 @@ def get_auth_token_broker(provided_api_key, include_feed_token=False):
                 logger.debug(f"Auth token retrieved from cache for user_id: {user_id}")
                 return cached_result
             except Exception as e:
-                logger.error(f"Error checking revocation status: {e}")
+                logger.exception(f"Error checking revocation status: {e}")
                 # On error, don't use cache
                 del auth_cache[cache_key]
 
@@ -594,7 +645,7 @@ def get_auth_token_broker(provided_api_key, include_feed_token=False):
                 logger.warning(f"No valid auth token or broker found for user_id '{user_id}'.")
                 return (None, None, None) if include_feed_token else (None, None)
         except Exception as e:
-            logger.error(f"Error while querying the database for auth token and broker: {e}")
+            logger.exception(f"Error while querying the database for auth token and broker: {e}")
             return (None, None, None) if include_feed_token else (None, None)
     else:
         return (None, None, None) if include_feed_token else (None, None)
@@ -616,7 +667,7 @@ def get_order_mode(user_id):
             return api_key_obj.order_mode
         return "auto"  # Default to auto mode
     except Exception as e:
-        logger.error(f"Error getting order mode for user {user_id}: {e}")
+        logger.exception(f"Error getting order mode for user {user_id}: {e}")
         return "auto"  # Default to auto on error
 
 
@@ -650,6 +701,6 @@ def update_order_mode(user_id, mode):
             logger.error(f"No API key found for user: {user_id}")
             return False
     except Exception as e:
-        logger.error(f"Error updating order mode: {e}")
+        logger.exception(f"Error updating order mode: {e}")
         db_session.rollback()
         return False

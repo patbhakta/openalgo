@@ -79,7 +79,7 @@ def get_connection(max_retries: int = 3, retry_delay: float = 0.5):
                 logger.debug(f"DuckDB connection attempt {attempt + 1} failed, retrying: {e}")
                 time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
             else:
-                logger.error(f"Failed to connect to DuckDB after {max_retries} attempts: {e}")
+                logger.exception(f"Failed to connect to DuckDB after {max_retries} attempts: {e}")
 
     if conn is None:
         raise last_error or Exception("Failed to connect to DuckDB")
@@ -327,7 +327,7 @@ def add_to_watchlist(symbol: str, exchange: str, display_name: str = None) -> tu
         logger.info(f"Added {symbol}:{exchange} to watchlist")
         return True, f"Added {symbol} to watchlist"
     except Exception as e:
-        logger.error(f"Error adding to watchlist: {e}")
+        logger.exception(f"Error adding to watchlist: {e}")
         return False, str(e)
 
 
@@ -398,7 +398,7 @@ def bulk_add_to_watchlist(symbols: list[dict[str, str]]) -> tuple[int, int, list
         return added, skipped, failed
 
     except Exception as e:
-        logger.error(f"Error bulk adding to watchlist: {e}")
+        logger.exception(f"Error bulk adding to watchlist: {e}")
         return 0, 0, [{"symbol": "batch", "exchange": "", "error": str(e)}]
 
 
@@ -422,8 +422,74 @@ def remove_from_watchlist(symbol: str, exchange: str) -> tuple[bool, str]:
         logger.info(f"Removed {symbol}:{exchange} from watchlist")
         return True, f"Removed {symbol} from watchlist"
     except Exception as e:
-        logger.error(f"Error removing from watchlist: {e}")
+        logger.exception(f"Error removing from watchlist: {e}")
         return False, str(e)
+
+
+def bulk_remove_from_watchlist(
+    symbols: list[dict[str, str]],
+) -> tuple[int, int, list[dict[str, str]]]:
+    """
+    Remove multiple symbols from the watchlist in a single transaction.
+
+    Args:
+        symbols: List of dicts with 'symbol' and 'exchange' keys
+
+    Returns:
+        Tuple of (removed_count, skipped_count, failed_list)
+    """
+    removed = 0
+    skipped = 0
+    failed = []
+
+    try:
+        with get_connection() as conn:
+            # Get existing symbols in one query
+            existing_result = conn.execute("""
+                SELECT symbol, exchange FROM watchlist
+            """).fetchall()
+            existing_set = {(row[0], row[1]) for row in existing_result}
+
+            for item in symbols:
+                symbol = item.get("symbol", "").upper()
+                exchange = item.get("exchange", "").upper()
+
+                if not symbol or not exchange:
+                    failed.append({
+                        "symbol": symbol or "MISSING",
+                        "exchange": exchange or "MISSING",
+                        "error": "Missing symbol or exchange",
+                    })
+                    continue
+
+                # Check if exists
+                if (symbol, exchange) not in existing_set:
+                    skipped += 1
+                    continue
+
+                try:
+                    conn.execute(
+                        """
+                        DELETE FROM watchlist
+                        WHERE symbol = ? AND exchange = ?
+                        """,
+                        [symbol, exchange],
+                    )
+                    removed += 1
+                    existing_set.discard((symbol, exchange))
+                except Exception as e:
+                    failed.append({
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "error": str(e),
+                    })
+
+        logger.info(f"Bulk watchlist remove: {removed} removed, {skipped} skipped, {len(failed)} failed")
+        return removed, skipped, failed
+
+    except Exception as e:
+        logger.exception(f"Error in bulk remove from watchlist: {e}")
+        return 0, 0, [{"symbol": "ALL", "exchange": "ALL", "error": str(e)}]
 
 
 def clear_watchlist() -> tuple[bool, str]:
@@ -434,7 +500,7 @@ def clear_watchlist() -> tuple[bool, str]:
         logger.info("Cleared watchlist")
         return True, "Watchlist cleared"
     except Exception as e:
-        logger.error(f"Error clearing watchlist: {e}")
+        logger.exception(f"Error clearing watchlist: {e}")
         return False, str(e)
 
 
@@ -578,7 +644,7 @@ def upsert_market_data(df: pd.DataFrame, symbol: str, exchange: str, interval: s
         return len(df)
 
     except Exception as e:
-        logger.error(f"Error upserting market data: {e}")
+        logger.exception(f"Error upserting market data: {e}")
         raise
 
 
@@ -796,7 +862,7 @@ def get_ohlcv(
         return result
 
     except Exception as e:
-        logger.error(f"Error fetching OHLCV data: {e}")
+        logger.exception(f"Error fetching OHLCV data: {e}")
         return pd.DataFrame()
 
 
@@ -944,7 +1010,7 @@ def _get_aggregated_ohlcv(
         return result
 
     except Exception as e:
-        logger.error(f"Error aggregating OHLCV data to {target_interval}: {e}")
+        logger.exception(f"Error aggregating OHLCV data to {target_interval}: {e}")
         return pd.DataFrame()
 
 
@@ -1069,7 +1135,7 @@ def _get_daily_aggregated_ohlcv(
         return result
 
     except Exception as e:
-        logger.error(f"Error aggregating daily OHLCV data to {target_interval}: {e}")
+        logger.exception(f"Error aggregating daily OHLCV data to {target_interval}: {e}")
         return pd.DataFrame()
 
 
@@ -1097,7 +1163,7 @@ def get_data_catalog() -> list[dict[str, Any]]:
         return result.to_dict("records")
 
     except Exception as e:
-        logger.error(f"Error fetching data catalog: {e}")
+        logger.exception(f"Error fetching data catalog: {e}")
         return []
 
 
@@ -1122,7 +1188,7 @@ def get_available_symbols() -> list[dict[str, str]]:
         return result.to_dict("records")
 
     except Exception as e:
-        logger.error(f"Error fetching available symbols: {e}")
+        logger.exception(f"Error fetching available symbols: {e}")
         return []
 
 
@@ -1154,7 +1220,7 @@ def get_data_range(symbol: str, exchange: str, interval: str) -> dict[str, Any] 
         return None
 
     except Exception as e:
-        logger.error(f"Error fetching data range: {e}")
+        logger.exception(f"Error fetching data range: {e}")
         return None
 
 
@@ -1209,8 +1275,81 @@ def delete_market_data(symbol: str, exchange: str, interval: str | None = None) 
         return True, msg
 
     except Exception as e:
-        logger.error(f"Error deleting market data: {e}")
+        logger.exception(f"Error deleting market data: {e}")
         return False, str(e)
+
+
+def bulk_delete_market_data(
+    symbols: list[dict[str, str]],
+) -> tuple[int, int, list[dict[str, str]]]:
+    """
+    Delete market data for multiple symbols in a single transaction.
+
+    Args:
+        symbols: List of dicts with 'symbol' and 'exchange' keys
+
+    Returns:
+        Tuple of (deleted_count, skipped_count, failed_list)
+    """
+    deleted = 0
+    skipped = 0
+    failed = []
+
+    try:
+        with get_connection() as conn:
+            for item in symbols:
+                symbol = item.get("symbol", "").upper()
+                exchange = item.get("exchange", "").upper()
+
+                if not symbol or not exchange:
+                    failed.append({
+                        "symbol": symbol or "MISSING",
+                        "exchange": exchange or "MISSING",
+                        "error": "Missing symbol or exchange",
+                    })
+                    continue
+
+                try:
+                    # Delete from market_data
+                    result = conn.execute(
+                        """
+                        DELETE FROM market_data
+                        WHERE symbol = ? AND exchange = ?
+                        """,
+                        [symbol, exchange],
+                    )
+                    rows_deleted = result.rowcount if hasattr(result, 'rowcount') else 0
+
+                    # Delete from data_catalog
+                    conn.execute(
+                        """
+                        DELETE FROM data_catalog
+                        WHERE symbol = ? AND exchange = ?
+                        """,
+                        [symbol, exchange],
+                    )
+
+                    if rows_deleted > 0:
+                        deleted += 1
+                        logger.info(f"Bulk delete: Deleted {symbol}:{exchange}")
+                    else:
+                        skipped += 1
+                        logger.debug(f"Bulk delete: No data found for {symbol}:{exchange}")
+
+                except Exception as e:
+                    failed.append({
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "error": str(e),
+                    })
+                    logger.error(f"Bulk delete: Failed to delete {symbol}:{exchange}: {e}")
+
+        logger.info(f"Bulk delete completed: {deleted} deleted, {skipped} skipped, {len(failed)} failed")
+        return deleted, skipped, failed
+
+    except Exception as e:
+        logger.exception(f"Error in bulk delete market data: {e}")
+        return 0, 0, [{"symbol": "ALL", "exchange": "ALL", "error": str(e)}]
 
 
 # =============================================================================
@@ -1291,7 +1430,7 @@ def export_to_csv(
         return True, f"Data exported to {output_path}"
 
     except Exception as e:
-        logger.error(f"Error exporting to CSV: {e}")
+        logger.exception(f"Error exporting to CSV: {e}")
         return False, str(e)
 
 
@@ -1353,7 +1492,7 @@ def get_database_stats() -> dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"Error fetching database stats: {e}")
+        logger.exception(f"Error fetching database stats: {e}")
         return {
             "database_path": get_db_path(),
             "database_size_mb": 0,
@@ -1372,7 +1511,7 @@ def vacuum_database():
             conn.execute("VACUUM")
         logger.info("Database vacuumed successfully")
     except Exception as e:
-        logger.error(f"Error vacuuming database: {e}")
+        logger.exception(f"Error vacuuming database: {e}")
 
 
 # Supported exchanges (these are static across brokers)
@@ -1404,7 +1543,7 @@ def get_supported_intervals(api_key: str) -> list[str]:
             return all_intervals
         return []
     except Exception as e:
-        logger.error(f"Error fetching supported intervals: {e}")
+        logger.exception(f"Error fetching supported intervals: {e}")
         return []
 
 
@@ -1514,7 +1653,7 @@ def import_from_csv(
         logger.error(f"CSV parsing error: {e}")
         return False, f"CSV parsing error: {str(e)}", 0
     except Exception as e:
-        logger.error(f"Error importing CSV: {e}")
+        logger.exception(f"Error importing CSV: {e}")
         return False, str(e), 0
 
 
@@ -1607,7 +1746,7 @@ def import_from_parquet(
         return True, msg, records
 
     except Exception as e:
-        logger.error(f"Error importing Parquet: {e}")
+        logger.exception(f"Error importing Parquet: {e}")
         return False, str(e), 0
 
 
@@ -1701,7 +1840,7 @@ def create_download_job(
         return True, f"Job created with {len(symbols)} symbols"
 
     except Exception as e:
-        logger.error(f"Error creating download job: {e}")
+        logger.exception(f"Error creating download job: {e}")
         return False, str(e)
 
 
@@ -1754,7 +1893,7 @@ def get_download_job(job_id: str) -> dict[str, Any] | None:
             return None
 
     except Exception as e:
-        logger.error(f"Error fetching download job: {e}")
+        logger.exception(f"Error fetching download job: {e}")
         return None
 
 
@@ -1801,7 +1940,7 @@ def get_all_download_jobs(status: str = None, limit: int = 50) -> list[dict[str,
             return result.to_dict("records")
 
     except Exception as e:
-        logger.error(f"Error fetching download jobs: {e}")
+        logger.exception(f"Error fetching download jobs: {e}")
         return []
 
 
@@ -1845,7 +1984,7 @@ def get_job_items(job_id: str, status: str = None) -> list[dict[str, Any]]:
             return result.to_dict("records")
 
     except Exception as e:
-        logger.error(f"Error fetching job items: {e}")
+        logger.exception(f"Error fetching job items: {e}")
         return []
 
 
@@ -1885,7 +2024,7 @@ def update_job_status(job_id: str, status: str, error_message: str = None) -> bo
         return True
 
     except Exception as e:
-        logger.error(f"Error updating job status: {e}")
+        logger.exception(f"Error updating job status: {e}")
         return False
 
 
@@ -1927,7 +2066,7 @@ def update_job_item_status(
         return True
 
     except Exception as e:
-        logger.error(f"Error updating job item status: {e}")
+        logger.exception(f"Error updating job item status: {e}")
         return False
 
 
@@ -1946,7 +2085,7 @@ def update_job_progress(job_id: str, completed: int, failed: int) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Error updating job progress: {e}")
+        logger.exception(f"Error updating job progress: {e}")
         return False
 
 
@@ -1961,7 +2100,7 @@ def delete_download_job(job_id: str) -> tuple[bool, str]:
         return True, f"Job {job_id} deleted"
 
     except Exception as e:
-        logger.error(f"Error deleting job: {e}")
+        logger.exception(f"Error deleting job: {e}")
         return False, str(e)
 
 
@@ -2038,7 +2177,7 @@ def upsert_symbol_metadata(symbols: list[dict[str, Any]]) -> int:
         return len(symbols)
 
     except Exception as e:
-        logger.error(f"Error upserting symbol metadata: {e}")
+        logger.exception(f"Error upserting symbol metadata: {e}")
         return 0
 
 
@@ -2071,7 +2210,7 @@ def get_symbol_metadata(symbol: str, exchange: str) -> dict[str, Any] | None:
             return None
 
     except Exception as e:
-        logger.error(f"Error fetching symbol metadata: {e}")
+        logger.exception(f"Error fetching symbol metadata: {e}")
         return None
 
 
@@ -2102,7 +2241,7 @@ def get_catalog_with_metadata() -> list[dict[str, Any]]:
             return result.to_dict("records")
 
     except Exception as e:
-        logger.error(f"Error fetching catalog with metadata: {e}")
+        logger.exception(f"Error fetching catalog with metadata: {e}")
         return []
 
 
@@ -2136,7 +2275,7 @@ def get_catalog_grouped(group_by: str = "underlying") -> dict[str, list[dict[str
         return grouped
 
     except Exception as e:
-        logger.error(f"Error grouping catalog: {e}")
+        logger.exception(f"Error grouping catalog: {e}")
         return {}
 
 
@@ -2260,7 +2399,7 @@ def export_to_parquet(
         return True, f"Exported {record_count} records ({file_size:.2f} MB)", record_count
 
     except Exception as e:
-        logger.error(f"Error exporting to Parquet: {e}")
+        logger.exception(f"Error exporting to Parquet: {e}")
         return False, str(e), 0
 
 
@@ -2342,7 +2481,7 @@ def export_to_txt(
         return True, f"Exported {record_count} records", record_count
 
     except Exception as e:
-        logger.error(f"Error exporting to TXT: {e}")
+        logger.exception(f"Error exporting to TXT: {e}")
         return False, str(e), 0
 
 
@@ -2621,7 +2760,7 @@ def export_to_zip(
         return True, message, total_records
 
     except Exception as e:
-        logger.error(f"Error exporting to ZIP: {e}")
+        logger.exception(f"Error exporting to ZIP: {e}")
         # Clean up partial file on error
         if os.path.exists(abs_output):
             try:
@@ -2709,7 +2848,7 @@ def export_bulk_csv(
         return True, f"Exported {record_count} records", record_count
 
     except Exception as e:
-        logger.error(f"Error exporting bulk CSV: {e}")
+        logger.exception(f"Error exporting bulk CSV: {e}")
         return False, str(e), 0
 
 
@@ -2803,7 +2942,7 @@ def get_export_preview(
             }
 
     except Exception as e:
-        logger.error(f"Error getting export preview: {e}")
+        logger.exception(f"Error getting export preview: {e}")
         return {
             "total_records": 0,
             "symbol_count": 0,
@@ -2888,7 +3027,7 @@ def create_schedule(
         return True, f"Schedule '{name}' created successfully"
 
     except Exception as e:
-        logger.error(f"Error creating schedule: {e}")
+        logger.exception(f"Error creating schedule: {e}")
         return False, str(e)
 
 
@@ -2936,7 +3075,7 @@ def get_schedule(schedule_id: str) -> dict[str, Any] | None:
             return _clean_schedule_record(record)
 
     except Exception as e:
-        logger.error(f"Error getting schedule: {e}")
+        logger.exception(f"Error getting schedule: {e}")
         return None
 
 
@@ -2961,7 +3100,7 @@ def get_all_schedules() -> list[dict[str, Any]]:
             return [_clean_schedule_record(r) for r in records]
 
     except Exception as e:
-        logger.error(f"Error getting schedules: {e}")
+        logger.exception(f"Error getting schedules: {e}")
         return []
 
 
@@ -3051,7 +3190,7 @@ def update_schedule(
         return True, "Schedule updated successfully"
 
     except Exception as e:
-        logger.error(f"Error updating schedule: {e}")
+        logger.exception(f"Error updating schedule: {e}")
         return False, str(e)
 
 
@@ -3070,7 +3209,7 @@ def delete_schedule(schedule_id: str) -> tuple[bool, str]:
         return True, "Schedule deleted successfully"
 
     except Exception as e:
-        logger.error(f"Error deleting schedule: {e}")
+        logger.exception(f"Error deleting schedule: {e}")
         return False, str(e)
 
 
@@ -3104,7 +3243,7 @@ def increment_schedule_run_counts(schedule_id: str, is_success: bool) -> tuple[b
         return True, "Run counts updated"
 
     except Exception as e:
-        logger.error(f"Error incrementing run counts: {e}")
+        logger.exception(f"Error incrementing run counts: {e}")
         return False, str(e)
 
 
@@ -3145,7 +3284,7 @@ def create_schedule_execution(schedule_id: str, download_job_id: str | None = No
         return execution_id
 
     except Exception as e:
-        logger.error(f"Error creating execution record: {e}")
+        logger.exception(f"Error creating execution record: {e}")
         return None
 
 
@@ -3202,7 +3341,7 @@ def update_schedule_execution(
         return True, "Execution updated"
 
     except Exception as e:
-        logger.error(f"Error updating execution: {e}")
+        logger.exception(f"Error updating execution: {e}")
         return False, str(e)
 
 
@@ -3231,7 +3370,7 @@ def get_schedule_executions(schedule_id: str, limit: int = 20) -> list[dict[str,
             return [_clean_schedule_record(r) for r in records]
 
     except Exception as e:
-        logger.error(f"Error getting executions: {e}")
+        logger.exception(f"Error getting executions: {e}")
         return []
 
 
@@ -3257,5 +3396,5 @@ def get_active_schedules() -> list[dict[str, Any]]:
             return [_clean_schedule_record(r) for r in records]
 
     except Exception as e:
-        logger.error(f"Error getting active schedules: {e}")
+        logger.exception(f"Error getting active schedules: {e}")
         return []

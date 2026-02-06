@@ -184,7 +184,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add frontend/dist/ static/css/main.css
+          git add -f frontend/dist/ static/css/main.css
           git diff --staged --quiet || git commit -m "chore: auto-build frontend dist [skip ci]"
           git push
 
@@ -192,6 +192,8 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     needs: [backend-lint, backend-test, frontend-build, security-scan]
+    # Skip for fork PRs (secrets not available)
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
     steps:
       - uses: actions/checkout@v6
 

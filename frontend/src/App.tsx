@@ -9,6 +9,7 @@ import { PageLoader } from '@/components/ui/page-loader'
 // Lazy load all pages for code splitting
 // Public pages
 const Home = lazy(() => import('@/pages/Home'))
+const Faq = lazy(() => import('@/pages/Faq'))
 const Setup = lazy(() => import('@/pages/Setup'))
 const Login = lazy(() => import('@/pages/Login'))
 const ResetPassword = lazy(() => import('@/pages/ResetPassword'))
@@ -31,6 +32,7 @@ const Token = lazy(() => import('@/pages/Token'))
 const Search = lazy(() => import('@/pages/Search'))
 const ApiKey = lazy(() => import('@/pages/ApiKey'))
 const Profile = lazy(() => import('@/pages/Profile'))
+const MasterContract = lazy(() => import('@/pages/MasterContract'))
 const ActionCenter = lazy(() => import('@/pages/ActionCenter'))
 
 // Platform pages
@@ -47,6 +49,9 @@ const WebSocketTest = lazy(() => import('@/pages/WebSocketTest'))
 const Playground = lazy(() => import('@/pages/Playground'))
 const Historify = lazy(() => import('@/pages/Historify'))
 const HistorifyCharts = lazy(() => import('@/pages/HistorifyCharts'))
+
+// Option Chain
+const OptionChain = lazy(() => import('@/pages/OptionChain'))
 
 // Strategy pages
 const StrategyIndex = lazy(() => import('@/pages/strategy/StrategyIndex'))
@@ -91,6 +96,7 @@ const LiveLogs = lazy(() => import('@/pages/Logs'))
 const SecurityDashboard = lazy(() => import('@/pages/monitoring/SecurityDashboard'))
 const TrafficDashboard = lazy(() => import('@/pages/monitoring/TrafficDashboard'))
 const LatencyDashboard = lazy(() => import('@/pages/monitoring/LatencyDashboard'))
+const HealthMonitor = lazy(() => import('@/pages/HealthMonitor'))
 
 function App() {
   return (
@@ -101,6 +107,7 @@ function App() {
             <Routes>
               {/* Public routes */}
               <Route path="/" element={<Home />} />
+              <Route path="/faq" element={<Faq />} />
               <Route path="/setup" element={<Setup />} />
               <Route path="/login" element={<Login />} />
               <Route path="/reset-password" element={<ResetPassword />} />
@@ -135,7 +142,11 @@ function App() {
                 <Route path="/sandbox" element={<Sandbox />} />
                 <Route path="/sandbox/mypnl" element={<SandboxPnL />} />
                 <Route path="/analyzer" element={<Analyzer />} />
+                <Route path="/optionchain" element={<OptionChain />} />
                 <Route path="/websocket/test" element={<WebSocketTest />} />
+                <Route path="/websocket/test/20" element={<WebSocketTest depthLevel={20} />} />
+                <Route path="/websocket/test/30" element={<WebSocketTest depthLevel={30} />} />
+                <Route path="/websocket/test/50" element={<WebSocketTest depthLevel={50} />} />
                 {/* Phase 6: Webhook Strategies */}
                 <Route path="/strategy" element={<StrategyIndex />} />
                 <Route path="/strategy/new" element={<NewStrategy />} />
@@ -176,8 +187,10 @@ function App() {
                 <Route path="/logs/security" element={<SecurityDashboard />} />
                 <Route path="/logs/traffic" element={<TrafficDashboard />} />
                 <Route path="/logs/latency" element={<LatencyDashboard />} />
+                <Route path="/health" element={<HealthMonitor />} />
                 {/* Phase 7: Settings & Action Center */}
                 <Route path="/profile" element={<Profile />} />
+                <Route path="/master-contract" element={<MasterContract />} />
                 <Route path="/action-center" element={<ActionCenter />} />
               </Route>
 

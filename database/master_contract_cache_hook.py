@@ -70,7 +70,7 @@ def load_symbols_to_cache(broker: str) -> bool:
             return False
 
     except Exception as e:
-        logger.error(f"Error loading symbols to cache: {e}")
+        logger.exception(f"Error loading symbols to cache: {e}")
 
         # Emit error event to frontend
         socketio.emit("cache_loaded", {"status": "error", "broker": broker, "message": str(e)})
@@ -103,10 +103,10 @@ def hook_into_master_contract_download(broker: str):
         except ImportError:
             logger.debug("Python strategy module not available")
         except Exception as strategy_error:
-            logger.error(f"Error restoring Python strategies: {strategy_error}")
+            logger.exception(f"Error restoring Python strategies: {strategy_error}")
 
     except Exception as e:
-        logger.error(f"Error in master contract cache hook: {e}")
+        logger.exception(f"Error in master contract cache hook: {e}")
 
 
 def clear_cache_on_logout():
@@ -127,7 +127,7 @@ def clear_cache_on_logout():
         logger.info(f"Cache cleared. Removed {symbols_cleared} symbols from memory")
 
     except Exception as e:
-        logger.error(f"Error clearing cache on logout: {e}")
+        logger.exception(f"Error clearing cache on logout: {e}")
 
 
 def refresh_cache_if_needed(broker: str):
@@ -151,7 +151,7 @@ def refresh_cache_if_needed(broker: str):
             logger.debug(f"Cache is still valid for broker: {broker}")
 
     except Exception as e:
-        logger.error(f"Error checking cache validity: {e}")
+        logger.exception(f"Error checking cache validity: {e}")
 
 
 def get_cache_health() -> dict:
@@ -170,13 +170,15 @@ def get_cache_health() -> dict:
         hit_rate = float(stats["stats"]["hit_rate"].rstrip("%"))
         cache_loaded = stats["cache_loaded"]
         cache_valid = stats["cache_valid"]
+        total_queries = stats["stats"].get("hits", 0) + stats["stats"].get("misses", 0)
 
         health_score = 100
         if not cache_loaded:
             health_score = 0
         elif not cache_valid:
             health_score = 50
-        elif hit_rate < 90:
+        elif total_queries > 10 and hit_rate < 90:
+            # Only penalize hit rate if there have been enough queries to be meaningful
             health_score = 75
 
         return {
@@ -196,7 +198,7 @@ def get_cache_health() -> dict:
         }
 
     except Exception as e:
-        logger.error(f"Error getting cache health: {e}")
+        logger.exception(f"Error getting cache health: {e}")
         return {"health_score": 0, "status": "error", "error": str(e)}
 
 
@@ -219,9 +221,10 @@ def _get_health_recommendations(health_score: int, stats: dict) -> list:
         recommendations.append("Cache has expired. Login again or refresh master contract.")
     elif health_score == 75:
         hit_rate = float(stats["stats"]["hit_rate"].rstrip("%"))
-        if hit_rate < 90:
+        total_queries = stats["stats"].get("hits", 0) + stats["stats"].get("misses", 0)
+        if total_queries > 10 and hit_rate < 90:
             recommendations.append(
-                f"Cache hit rate is low ({hit_rate}%). Consider checking symbol mappings."
+                f"Cache hit rate is low ({hit_rate:.1f}%). Consider checking symbol mappings."
             )
 
     db_queries = stats["stats"].get("db_queries", 0)

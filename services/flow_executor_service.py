@@ -148,7 +148,7 @@ class NodeExecutor:
     def log(self, message: str, level: str = "info"):
         """Add log entry"""
         self.logs.append(
-            {"time": datetime.utcnow().isoformat(), "message": message, "level": level}
+            {"time": datetime.now().isoformat(), "message": message, "level": level}
         )
         if level == "error":
             logger.error(message)
@@ -740,6 +740,15 @@ class NodeExecutor:
         exchange = self.get_str(node_data, "exchange", "NSE")
         self.log(f"Getting depth for: {symbol}")
         result = self.client.get_depth(symbol=symbol, exchange=exchange)
+        self.store_output(node_data, result)
+        return result
+
+    def execute_get_order_status(self, node_data: dict) -> dict:
+        """Execute Get Order Status node"""
+        order_id = self.get_str(node_data, "orderId", "")
+        self.log(f"Getting order status for: {order_id}")
+        result = self.client.get_order_status(order_id=order_id)
+        self.log(f"Order status result: {result}")
         self.store_output(node_data, result)
         return result
 
@@ -1718,6 +1727,8 @@ def execute_node_chain(
         result = executor.execute_get_quote(node_data)
     elif node_type == "getDepth":
         result = executor.execute_get_depth(node_data)
+    elif node_type == "getOrderStatus":
+        result = executor.execute_get_order_status(node_data)
     elif node_type == "openPosition":
         result = executor.execute_open_position(node_data)
     elif node_type == "history":
@@ -1911,10 +1922,10 @@ def execute_workflow(
             }
 
         except Exception as e:
-            logger.error(f"Workflow execution failed: {e}")
+            logger.exception(f"Workflow execution failed: {e}")
             logs.append(
                 {
-                    "time": datetime.utcnow().isoformat(),
+                    "time": datetime.now().isoformat(),
                     "message": f"Error: {str(e)}",
                     "level": "error",
                 }

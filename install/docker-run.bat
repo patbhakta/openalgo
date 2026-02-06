@@ -285,7 +285,7 @@ if not exist "%OPENALGO_DIR%\%ENV_FILE%" (
     echo.
 )
 
-REM Create db, strategies, and log directories if not exist
+REM Create db, strategies, log, keys, and tmp directories if not exist
 if not exist "%OPENALGO_DIR%\db\" (
     echo [INFO] Creating database directory...
     md "%OPENALGO_DIR%\db" 2>nul
@@ -301,6 +301,14 @@ if not exist "%OPENALGO_DIR%\log\" (
     md "%OPENALGO_DIR%\log" 2>nul
     md "%OPENALGO_DIR%\log\strategies" 2>nul
 )
+if not exist "%OPENALGO_DIR%\keys\" (
+    echo [INFO] Creating keys directory...
+    md "%OPENALGO_DIR%\keys" 2>nul
+)
+if not exist "%OPENALGO_DIR%\tmp\" (
+    echo [INFO] Creating temp directory...
+    md "%OPENALGO_DIR%\tmp" 2>nul
+)
 
 REM Pull latest image
 echo [INFO] Pulling latest image...
@@ -313,15 +321,66 @@ REM Stop and remove existing container if exists
 docker stop %CONTAINER% >nul 2>&1
 docker rm %CONTAINER% >nul 2>&1
 
+REM Calculate dynamic resource limits based on available RAM
+for /f "tokens=2 delims==" %%i in ('wmic computersystem get TotalPhysicalMemory /value ^| findstr TotalPhysicalMemory') do set TOTAL_RAM_BYTES=%%i
+set /a TOTAL_RAM_MB=%TOTAL_RAM_BYTES:~0,-6%
+
+REM Get CPU cores
+for /f "tokens=2 delims==" %%i in ('wmic cpu get NumberOfCores /value ^| findstr NumberOfCores') do set CPU_CORES=%%i
+if "%CPU_CORES%"=="" set CPU_CORES=2
+
+REM shm_size: 25% of RAM (min 256MB, max 2GB)
+set /a SHM_SIZE_MB=%TOTAL_RAM_MB% / 4
+if %SHM_SIZE_MB% LSS 256 set SHM_SIZE_MB=256
+if %SHM_SIZE_MB% GTR 2048 set SHM_SIZE_MB=2048
+
+REM Thread limits based on RAM (prevents RLIMIT_NPROC exhaustion)
+REM Less than 3GB: 1 thread | 3-6GB: 2 threads | 6GB+: min(4, cores)
+REM See: https://github.com/marketcalls/openalgo/issues/822
+if %TOTAL_RAM_MB% LSS 3000 (
+    set THREAD_LIMIT=1
+) else if %TOTAL_RAM_MB% LSS 6000 (
+    set THREAD_LIMIT=2
+) else (
+    if %CPU_CORES% LSS 4 (
+        set THREAD_LIMIT=%CPU_CORES%
+    ) else (
+        set THREAD_LIMIT=4
+    )
+)
+
+REM Strategy memory limit based on RAM
+REM Less than 3GB: 256MB | 3-6GB: 512MB | 6GB+: 1024MB
+if %TOTAL_RAM_MB% LSS 3000 (
+    set STRATEGY_MEM_LIMIT=256
+) else if %TOTAL_RAM_MB% LSS 6000 (
+    set STRATEGY_MEM_LIMIT=512
+) else (
+    set STRATEGY_MEM_LIMIT=1024
+)
+
+echo [INFO] System: %TOTAL_RAM_MB%MB RAM, %CPU_CORES% cores
+echo [INFO] Config: shm=%SHM_SIZE_MB%MB, threads=%THREAD_LIMIT%, strategy_mem=%STRATEGY_MEM_LIMIT%MB
+
 REM Run container
 echo [INFO] Starting container...
 docker run -d ^
     --name %CONTAINER% ^
+    --shm-size=%SHM_SIZE_MB%m ^
     -p 5000:5000 ^
     -p 8765:8765 ^
+    -e "OPENBLAS_NUM_THREADS=%THREAD_LIMIT%" ^
+    -e "OMP_NUM_THREADS=%THREAD_LIMIT%" ^
+    -e "MKL_NUM_THREADS=%THREAD_LIMIT%" ^
+    -e "NUMEXPR_NUM_THREADS=%THREAD_LIMIT%" ^
+    -e "NUMBA_NUM_THREADS=%THREAD_LIMIT%" ^
+    -e "STRATEGY_MEMORY_LIMIT_MB=%STRATEGY_MEM_LIMIT%" ^
+    -e "TZ=Asia/Kolkata" ^
     -v "%OPENALGO_DIR%\db:/app/db" ^
     -v "%OPENALGO_DIR%\strategies:/app/strategies" ^
     -v "%OPENALGO_DIR%\log:/app/log" ^
+    -v "%OPENALGO_DIR%\keys:/app/keys" ^
+    -v "%OPENALGO_DIR%\tmp:/app/tmp" ^
     -v "%OPENALGO_DIR%\.env:/app/.env:ro" ^
     --restart unless-stopped ^
     %IMAGE%

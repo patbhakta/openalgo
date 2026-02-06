@@ -231,7 +231,7 @@ class PositionManager:
                     # Add to valid_positions - it's now closed but still show it
                     valid_positions.append(position)
                 except Exception as e:
-                    logger.error(f"Error settling expired position {position.symbol}: {e}")
+                    logger.exception(f"Error settling expired position {position.symbol}: {e}")
                     valid_positions.append(position)
             else:
                 # Contract is still valid
@@ -468,18 +468,33 @@ class PositionManager:
                 total_today_realized_pnl += today_realized
                 total_pnl_today += position_total_pnl_today
 
+                # Calculate P&L% based on total P&L (realized + unrealized) for the day
+                # For open positions: % based on total investment
+                # For closed positions (qty=0): 0% (like Zerodha - avg resets to 0, can't calculate)
+                if position.quantity != 0:
+                    investment = abs(Decimal(str(position.average_price)) * Decimal(str(position.quantity)))
+                    if investment > 0:
+                        calculated_pnl_percent = (position_total_pnl_today / investment) * Decimal("100")
+                    else:
+                        calculated_pnl_percent = Decimal("0.00")
+                    display_avg_price = float(position.average_price)
+                else:
+                    # Closed position - show 0% and avg=0 (like Zerodha)
+                    calculated_pnl_percent = Decimal("0.00")
+                    display_avg_price = 0.0  # Reset to 0 for display (like Zerodha)
+
                 positions_list.append(
                     {
                         "symbol": position.symbol,
                         "exchange": position.exchange,
                         "product": position.product,
                         "quantity": position.quantity,
-                        "average_price": float(position.average_price),
+                        "average_price": display_avg_price,  # 0 for closed positions (like Zerodha)
                         "ltp": float(position.ltp) if position.ltp else 0.0,
                         "pnl": float(
                             position_total_pnl_today
                         ),  # Today's total P&L (realized + unrealized)
-                        "pnl_percent": float(position.pnl_percent),
+                        "pnlpercent": float(calculated_pnl_percent),  # Fixed: use pnlpercent (no underscore) to match frontend
                         "unrealized_pnl": float(unrealized_pnl),  # Unrealized only (for reference)
                         "today_realized_pnl": float(today_realized),
                         "total_pnl_today": float(position_total_pnl_today),
@@ -508,7 +523,7 @@ class PositionManager:
             )
 
         except Exception as e:
-            logger.error(f"Error getting positions for user {self.user_id}: {e}")
+            logger.exception(f"Error getting positions for user {self.user_id}: {e}")
             return (
                 False,
                 {
@@ -544,7 +559,7 @@ class PositionManager:
             }
 
         except Exception as e:
-            logger.error(f"Error getting position for {symbol}: {e}")
+            logger.exception(f"Error getting position for {symbol}: {e}")
             return None
 
     def _update_positions_mtm(self, positions):
@@ -577,23 +592,19 @@ class PositionManager:
             ]
 
             if missing_symbols:
-                # Fallback to multiquotes for missing symbols
+                # Fallback to multiquotes for missing symbols (no individual quote fallback to avoid rate limiting)
                 logger.debug(
                     f"Positions MTM: {ws_count} from WebSocket, {len(missing_symbols)} need multiquotes fallback"
                 )
                 multiquotes_cache = self._fetch_quotes_batch(missing_symbols)
                 quote_cache.update(multiquotes_cache)
 
-                # Final fallback: individual fetch for any still missing
+                # Log any symbols that couldn't be fetched (don't fall back to individual quotes)
                 still_missing = [
                     s for s in missing_symbols if s not in quote_cache or quote_cache[s] is None
                 ]
                 if still_missing:
-                    logger.debug(f"Fetching {len(still_missing)} symbols individually")
-                    for symbol, exchange in still_missing:
-                        quote = self._fetch_quote(symbol, exchange)
-                        if quote:
-                            quote_cache[(symbol, exchange)] = quote
+                    logger.debug(f"{len(still_missing)} symbols not available via multiquotes, waiting for WebSocket data")
             else:
                 logger.debug(f"Positions MTM: All {ws_count} symbols from WebSocket (no API calls)")
 
@@ -627,7 +638,7 @@ class PositionManager:
 
         except Exception as e:
             db_session.rollback()
-            logger.error(f"Error updating positions MTM: {e}")
+            logger.exception(f"Error updating positions MTM: {e}")
 
     def _update_single_position_mtm(self, position):
         """
@@ -668,7 +679,7 @@ class PositionManager:
 
         except Exception as e:
             db_session.rollback()
-            logger.error(f"Error updating position MTM for {position.symbol}: {e}")
+            logger.exception(f"Error updating position MTM for {position.symbol}: {e}")
 
     def _calculate_position_pnl(self, quantity, avg_price, ltp):
         """Calculate P&L for a position"""
@@ -687,7 +698,7 @@ class PositionManager:
             return pnl
 
         except Exception as e:
-            logger.error(f"Error calculating position P&L: {e}")
+            logger.exception(f"Error calculating position P&L: {e}")
             return Decimal("0.00")
 
     def _calculate_pnl_percent(self, avg_price, ltp, quantity):
@@ -709,7 +720,7 @@ class PositionManager:
             return pnl_percent
 
         except Exception as e:
-            logger.error(f"Error calculating P&L percent: {e}")
+            logger.exception(f"Error calculating P&L percent: {e}")
             return Decimal("0.00")
 
     def _fetch_quotes_from_websocket(self, symbols_list):
@@ -781,7 +792,7 @@ class PositionManager:
                 return None
 
         except Exception as e:
-            logger.error(f"Error fetching quote for {symbol}: {e}")
+            logger.exception(f"Error fetching quote for {symbol}: {e}")
             return None
 
     def _fetch_quotes_batch(self, symbols_list):
@@ -904,7 +915,7 @@ class PositionManager:
                 return False, response, status_code
 
         except Exception as e:
-            logger.error(f"Error closing position {symbol}: {e}")
+            logger.exception(f"Error closing position {symbol}: {e}")
             return (
                 False,
                 {
@@ -978,7 +989,7 @@ class PositionManager:
             return True, {"status": "success", "data": tradebook, "mode": "analyze"}, 200
 
         except Exception as e:
-            logger.error(f"Error getting tradebook: {e}")
+            logger.exception(f"Error getting tradebook: {e}")
             return (
                 False,
                 {
@@ -1078,7 +1089,7 @@ class PositionManager:
             )
 
         except Exception as e:
-            logger.error(f"Error in EOD settlement: {e}")
+            logger.exception(f"Error in EOD settlement: {e}")
             db.session.rollback()
             return (
                 False,
@@ -1094,6 +1105,13 @@ class PositionManager:
 def update_all_positions_mtm():
     """Background task to update MTM for all positions"""
     try:
+        # Skip MTM updates when market is closed (prices won't change)
+        from database.market_calendar_db import is_market_open
+
+        if not is_market_open():
+            logger.debug("Market closed - skipping MTM update")
+            return
+
         # Get all unique users with positions
         positions = SandboxPositions.query.all()
 
@@ -1111,7 +1129,7 @@ def update_all_positions_mtm():
         logger.info("MTM update completed")
 
     except Exception as e:
-        logger.error(f"Error updating MTM for all positions: {e}")
+        logger.exception(f"Error updating MTM for all positions: {e}")
 
 
 def process_all_users_settlement():
@@ -1143,13 +1161,13 @@ def process_all_users_settlement():
                     logger.error(f"Settlement failed for user {user_id}: {message}")
 
             except Exception as e:
-                logger.error(f"Error in settlement for user {user_id}: {e}")
+                logger.exception(f"Error in settlement for user {user_id}: {e}")
                 continue
 
         logger.debug("T+1 settlement completed for all users")
 
     except Exception as e:
-        logger.error(f"Error in T+1 settlement process: {e}")
+        logger.exception(f"Error in T+1 settlement process: {e}")
 
 
 def cleanup_expired_contracts():
@@ -1293,11 +1311,11 @@ def cleanup_expired_contracts():
 
                     except Exception as e:
                         db_session.rollback()
-                        logger.error(f"Error cleaning up expired position {position.symbol}: {e}")
+                        logger.exception(f"Error cleaning up expired position {position.symbol}: {e}")
                         continue
 
             except Exception as e:
-                logger.error(f"Error processing expired contracts for user {user_id}: {e}")
+                logger.exception(f"Error processing expired contracts for user {user_id}: {e}")
                 continue
 
         logger.info(
@@ -1305,7 +1323,7 @@ def cleanup_expired_contracts():
         )
 
     except Exception as e:
-        logger.error(f"Error in expired contract cleanup: {e}")
+        logger.exception(f"Error in expired contract cleanup: {e}")
 
 
 def catchup_missed_settlements():
@@ -1320,7 +1338,7 @@ def catchup_missed_settlements():
     try:
         # First, clean up expired F&O contracts
         # This is important to do first so users don't see stale contracts
-        logger.info("Running expired contract cleanup...")
+        logger.debug("Running expired contract cleanup...")
         cleanup_expired_contracts()
 
         # Then handle CNC T+1 settlement
@@ -1353,13 +1371,13 @@ def catchup_missed_settlements():
                     logger.error(f"Catch-up settlement failed for user {user_id}: {message}")
 
             except Exception as e:
-                logger.error(f"Error in catch-up settlement for user {user_id}: {e}")
+                logger.exception(f"Error in catch-up settlement for user {user_id}: {e}")
                 continue
 
         logger.info("Catch-up settlement process completed")
 
     except Exception as e:
-        logger.error(f"Error in catch-up settlement: {e}")
+        logger.exception(f"Error in catch-up settlement: {e}")
 
 
 if __name__ == "__main__":
@@ -1385,4 +1403,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("MTM updater stopped by user")
     except Exception as e:
-        logger.error(f"MTM updater error: {e}")
+        logger.exception(f"MTM updater error: {e}")

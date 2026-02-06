@@ -79,6 +79,12 @@ def react_download():
     return serve_react_app()
 
 
+# FAQ page
+@react_bp.route("/faq")
+def react_faq():
+    return serve_react_app()
+
+
 # Error page
 @react_bp.route("/error")
 def react_error():
@@ -182,6 +188,22 @@ def react_pnltracker():
 # WebSocket market data test page
 @react_bp.route("/websocket/test")
 def react_websocket_test():
+    return serve_react_app()
+
+
+# WebSocket depth test pages (broker dependent depth levels)
+@react_bp.route("/websocket/test/20")
+def react_websocket_test_20():
+    return serve_react_app()
+
+
+@react_bp.route("/websocket/test/30")
+def react_websocket_test_30():
+    return serve_react_app()
+
+
+@react_bp.route("/websocket/test/50")
+def react_websocket_test_50():
     return serve_react_app()
 
 

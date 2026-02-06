@@ -69,26 +69,18 @@ class ExecutionEngine:
             quote_cache = {}
             symbols_list = list(orders_by_symbol.keys())
 
-            # Try batch fetch using multiquotes
+            # Fetch quotes using multiquotes only (no individual quote fallback to avoid rate limiting)
+            # WebSocket is the primary data source; multiquotes is the fallback
             quote_cache = self._fetch_quotes_batch(symbols_list)
 
-            # Fallback: For any symbols that failed in batch, try individual fetch
+            # Log symbols that couldn't be fetched (don't retry individually to avoid rate limits)
             failed_symbols = [
                 s for s in symbols_list if s not in quote_cache or quote_cache[s] is None
             ]
             if failed_symbols:
                 logger.debug(
-                    f"Fetching {len(failed_symbols)} symbols individually (multiquotes fallback)"
+                    f"{len(failed_symbols)} symbols not available via multiquotes, waiting for WebSocket data"
                 )
-                for i in range(0, len(failed_symbols), self.api_rate_limit):
-                    batch = failed_symbols[i : i + self.api_rate_limit]
-                    for symbol, exchange in batch:
-                        quote = self._fetch_quote(symbol, exchange)
-                        if quote:
-                            quote_cache[(symbol, exchange)] = quote
-                    # Wait 1 second before next batch if more symbols remain
-                    if i + self.api_rate_limit < len(failed_symbols):
-                        time.sleep(self.batch_delay)
 
             # Process orders in batches (respecting order rate limit of 10/second)
             orders_processed = 0
@@ -108,7 +100,7 @@ class ExecutionEngine:
             logger.info(f"Processed {orders_processed} orders")
 
         except Exception as e:
-            logger.error(f"Error in execution engine: {e}")
+            logger.exception(f"Error in execution engine: {e}")
 
     def _fetch_quote(self, symbol, exchange):
         """
@@ -305,7 +297,7 @@ class ExecutionEngine:
                 self._execute_order(order, execution_price)
 
         except Exception as e:
-            logger.error(f"Error processing order {order.orderid}: {e}")
+            logger.exception(f"Error processing order {order.orderid}: {e}")
 
     def _execute_order(self, order, execution_price):
         """
@@ -352,7 +344,7 @@ class ExecutionEngine:
 
         except Exception as e:
             db_session.rollback()
-            logger.error(f"Error executing order {order.orderid}: {e}")
+            logger.exception(f"Error executing order {order.orderid}: {e}")
 
             # Mark order as rejected
             try:
@@ -614,7 +606,7 @@ class ExecutionEngine:
 
         except Exception as e:
             db_session.rollback()
-            logger.error(f"Error updating position for order {order.orderid}: {e}")
+            logger.exception(f"Error updating position for order {order.orderid}: {e}")
             raise
 
     def _calculate_realized_pnl(self, old_quantity, avg_price, close_quantity, close_price):
@@ -634,7 +626,7 @@ class ExecutionEngine:
             return pnl
 
         except Exception as e:
-            logger.error(f"Error calculating realized P&L: {e}")
+            logger.exception(f"Error calculating realized P&L: {e}")
             return Decimal("0.00")
 
     def _generate_trade_id(self):
@@ -670,4 +662,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Execution engine stopped by user")
     except Exception as e:
-        logger.error(f"Execution engine error: {e}")
+        logger.exception(f"Execution engine error: {e}")

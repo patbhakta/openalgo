@@ -599,7 +599,7 @@ def get_holidays_by_year(year: int) -> list[dict[str, Any]]:
         return result
 
     except Exception as e:
-        logger.error(f"Error fetching holidays for year {year}: {e}")
+        logger.exception(f"Error fetching holidays for year {year}: {e}")
         return []
 
 
@@ -639,12 +639,12 @@ def get_market_timings_for_date(query_date: date) -> list[dict[str, Any]]:
     if cache_key in _timings_cache:
         return _timings_cache[cache_key]
 
-    try:
-        # Check if it's a weekend (Saturday=5, Sunday=6)
-        if query_date.weekday() >= 5:
-            _timings_cache[cache_key] = []
-            return []
+    # Check if it's a weekend first (doesn't require database)
+    if query_date.weekday() >= 5:
+        _timings_cache[cache_key] = []
+        return []
 
+    try:
         # Calculate midnight timestamp for the date in IST
         midnight_ist = datetime.combine(query_date, datetime.min.time())
         midnight_epoch = int(midnight_ist.timestamp() * 1000)
@@ -652,7 +652,8 @@ def get_market_timings_for_date(query_date: date) -> list[dict[str, Any]]:
         # Get timing offsets from database (or defaults if not in DB)
         timing_offsets = _get_timing_offsets()
 
-        # Check if it's a holiday
+        # Check if it's a holiday/special session FIRST (before weekend check)
+        # This allows special sessions like Budget Day or Muhurat Trading on weekends
         holiday = Holiday.query.filter(Holiday.holiday_date == query_date).first()
 
         if holiday:
@@ -704,6 +705,12 @@ def get_market_timings_for_date(query_date: date) -> list[dict[str, Any]]:
             _timings_cache[cache_key] = result
             return result
 
+        # No holiday entry found - check if it's a weekend (Saturday=5, Sunday=6)
+        # Weekend check is done AFTER holiday check so special sessions on weekends work
+        if query_date.weekday() >= 5:
+            _timings_cache[cache_key] = []
+            return []
+
         # Normal trading day - return timings for all exchanges from DB
         result = []
         for exchange in SUPPORTED_EXCHANGES:
@@ -721,7 +728,7 @@ def get_market_timings_for_date(query_date: date) -> list[dict[str, Any]]:
         return result
 
     except Exception as e:
-        logger.error(f"Error fetching market timings for {query_date}: {e}")
+        logger.exception(f"Error fetching market timings for {query_date}: {e}")
         return []
 
 
@@ -736,31 +743,39 @@ def is_market_holiday(query_date: date, exchange: str = None) -> bool:
     Returns:
         True if it's a holiday (or weekend), False otherwise
     """
-    # Weekend check
-    if query_date.weekday() >= 5:
-        return True
+    try:
+        # Check for special session FIRST (before weekend check)
+        # This allows special sessions like Budget Day or Muhurat Trading on weekends
+        holiday = Holiday.query.filter(Holiday.holiday_date == query_date).first()
 
-    holiday = Holiday.query.filter(Holiday.holiday_date == query_date).first()
+        # Special sessions are not holidays - markets are open with special timings
+        if holiday and holiday.holiday_type == "SPECIAL_SESSION":
+            return False
 
-    if not holiday:
-        return False
+        # Weekend check (only if no special session)
+        if query_date.weekday() >= 5:
+            return True
 
-    # Special sessions are not full holidays
-    if holiday.holiday_type == "SPECIAL_SESSION":
-        return False
+        if not holiday:
+            return False
 
-    if exchange:
-        # Check if specific exchange is closed
-        exchange_info = HolidayExchange.query.filter(
-            HolidayExchange.holiday_id == holiday.id,
-            HolidayExchange.exchange_code == exchange.upper(),
-        ).first()
+        if exchange:
+            # Check if specific exchange is closed
+            exchange_info = HolidayExchange.query.filter(
+                HolidayExchange.holiday_id == holiday.id,
+                HolidayExchange.exchange_code == exchange.upper(),
+            ).first()
 
-        if exchange_info:
-            return not exchange_info.is_open
-        return False  # Exchange not in holiday list means it's open
+            if exchange_info:
+                return not exchange_info.is_open
+            return False  # Exchange not in holiday list means it's open
 
-    return True  # It's a holiday
+        return True  # It's a holiday
+    except Exception as e:
+        # Handle case where tables don't exist yet (fresh installation)
+        # Fall back to simple weekend check
+        logger.debug(f"Holiday check unavailable (tables may not exist yet): {e}")
+        return query_date.weekday() >= 5  # Return True only for weekends
 
 
 def clear_market_calendar_cache():
@@ -792,7 +807,7 @@ def reset_holiday_data():
         return True
     except Exception as e:
         db_session.rollback()
-        logger.error(f"Failed to reset holiday data: {e}")
+        logger.exception(f"Failed to reset holiday data: {e}")
         return False
 
 
@@ -812,7 +827,7 @@ def check_and_update_holidays():
 
         return True
     except Exception as e:
-        logger.error(f"Error checking holiday data: {e}")
+        logger.exception(f"Error checking holiday data: {e}")
         return False
 
 
@@ -896,7 +911,7 @@ def get_all_market_timings() -> list[dict[str, Any]]:
         return result
 
     except Exception as e:
-        logger.error(f"Error fetching market timings: {e}")
+        logger.exception(f"Error fetching market timings: {e}")
         return []
 
 
@@ -954,7 +969,7 @@ def update_market_timing(exchange: str, start_time: str, end_time: str) -> bool:
 
     except Exception as e:
         db_session.rollback()
-        logger.error(f"Error updating market timing: {e}")
+        logger.exception(f"Error updating market timing: {e}")
         return False
 
 
@@ -995,7 +1010,7 @@ def get_market_timing(exchange: str) -> dict[str, Any] | None:
         return None
 
     except Exception as e:
-        logger.error(f"Error fetching market timing for {exchange}: {e}")
+        logger.exception(f"Error fetching market timing for {exchange}: {e}")
         return None
 
 
@@ -1036,7 +1051,7 @@ def is_market_open(exchange: str = None) -> bool:
             return False
 
     except Exception as e:
-        logger.error(f"Error checking if market is open: {e}")
+        logger.exception(f"Error checking if market is open: {e}")
         return False
 
 
@@ -1098,7 +1113,7 @@ def get_market_hours_status() -> dict[str, Any]:
         }
 
     except Exception as e:
-        logger.error(f"Error getting market hours status: {e}")
+        logger.exception(f"Error getting market hours status: {e}")
         return {"is_trading_day": False, "any_market_open": False, "exchanges": {}, "error": str(e)}
 
 
@@ -1160,5 +1175,5 @@ def get_next_market_event() -> tuple[str, datetime]:
                 return ("open", None)
 
     except Exception as e:
-        logger.error(f"Error getting next market event: {e}")
+        logger.exception(f"Error getting next market event: {e}")
         return ("unknown", None)

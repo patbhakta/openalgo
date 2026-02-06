@@ -503,6 +503,19 @@ class OrderManager:
 
             logger.info(f"Order placed: {orderid} - {symbol} {action} {quantity} @ {price_type}")
 
+            # Notify WebSocket execution engine to index and subscribe this symbol
+            try:
+                from sandbox.websocket_execution_engine import (
+                    get_websocket_execution_engine,
+                    is_websocket_execution_engine_running,
+                )
+
+                if is_websocket_execution_engine_running():
+                    engine = get_websocket_execution_engine()
+                    engine.notify_order_placed(order)
+            except Exception as e:
+                logger.debug(f"WebSocket execution engine notification skipped: {e}")
+
             # Execute MARKET orders immediately using cached quote (no re-fetch needed)
             if price_type == "MARKET":
                 try:
@@ -520,14 +533,14 @@ class OrderManager:
                             f"Could not fetch quote for {symbol} on {exchange}, order remains open"
                         )
                 except Exception as e:
-                    logger.error(f"Error executing market order immediately: {e}")
+                    logger.exception(f"Error executing market order immediately: {e}")
                     # Order remains in 'open' status if execution fails
 
             return True, {"status": "success", "orderid": orderid, "mode": "analyze"}, 200
 
         except Exception as e:
             db_session.rollback()
-            logger.error(f"Error placing order: {e}")
+            logger.exception(f"Error placing order: {e}")
             return (
                 False,
                 {"status": "error", "message": f"Error placing order: {str(e)}", "mode": "analyze"},
@@ -612,7 +625,7 @@ class OrderManager:
 
         except Exception as e:
             db_session.rollback()
-            logger.error(f"Error modifying order {orderid}: {e}")
+            logger.exception(f"Error modifying order {orderid}: {e}")
             return (
                 False,
                 {
@@ -708,7 +721,7 @@ class OrderManager:
                                     )
                                     order_price = Decimal("0")
                             except Exception as e:
-                                logger.error(f"Error fetching quote for margin release: {e}")
+                                logger.exception(f"Error fetching quote for margin release: {e}")
                                 order_price = Decimal("0")
                         else:
                             order_price = order.price
@@ -752,7 +765,7 @@ class OrderManager:
 
         except Exception as e:
             db_session.rollback()
-            logger.error(f"Error cancelling order {orderid}: {e}")
+            logger.exception(f"Error cancelling order {orderid}: {e}")
             return (
                 False,
                 {
@@ -839,7 +852,7 @@ class OrderManager:
             )
 
         except Exception as e:
-            logger.error(f"Error getting orderbook: {e}")
+            logger.exception(f"Error getting orderbook: {e}")
             return (
                 False,
                 {
@@ -889,7 +902,7 @@ class OrderManager:
             )
 
         except Exception as e:
-            logger.error(f"Error getting order status: {e}")
+            logger.exception(f"Error getting order status: {e}")
             return (
                 False,
                 {

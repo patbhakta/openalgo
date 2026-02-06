@@ -338,7 +338,7 @@ do_start() {
         echo ""
     fi
 
-    # Create db, strategies, and log directories if not exist
+    # Create db, strategies, log, keys, and tmp directories if not exist
     if [ ! -d "$OPENALGO_DIR/db" ]; then
         log_info "Creating database directory..."
         mkdir -p "$OPENALGO_DIR/db"
@@ -352,6 +352,14 @@ do_start() {
         log_info "Creating log directory..."
         mkdir -p "$OPENALGO_DIR/log/strategies"
     fi
+    if [ ! -d "$OPENALGO_DIR/keys" ]; then
+        log_info "Creating keys directory..."
+        mkdir -p "$OPENALGO_DIR/keys"
+    fi
+    if [ ! -d "$OPENALGO_DIR/tmp" ]; then
+        log_info "Creating temp directory..."
+        mkdir -p "$OPENALGO_DIR/tmp"
+    fi
 
     # Pull latest image
     log_info "Pulling latest image..."
@@ -363,15 +371,63 @@ do_start() {
     docker stop "$CONTAINER" >/dev/null 2>&1
     docker rm "$CONTAINER" >/dev/null 2>&1
 
+    # Calculate dynamic resource limits based on available RAM
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        TOTAL_RAM_MB=$(($(sysctl -n hw.memsize) / 1024 / 1024))
+        CPU_CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 2)
+    else
+        TOTAL_RAM_MB=$(($(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024))
+        CPU_CORES=$(nproc 2>/dev/null || echo 2)
+    fi
+
+    # shm_size: 25% of RAM (min 256MB, max 2GB)
+    SHM_SIZE_MB=$((TOTAL_RAM_MB / 4))
+    [ $SHM_SIZE_MB -lt 256 ] && SHM_SIZE_MB=256
+    [ $SHM_SIZE_MB -gt 2048 ] && SHM_SIZE_MB=2048
+
+    # Thread limits based on RAM (prevents RLIMIT_NPROC exhaustion)
+    # <3GB: 1 thread | 3-6GB: 2 threads | 6GB+: min(4, cores)
+    # See: https://github.com/marketcalls/openalgo/issues/822
+    if [ $TOTAL_RAM_MB -lt 3000 ]; then
+        THREAD_LIMIT=1
+    elif [ $TOTAL_RAM_MB -lt 6000 ]; then
+        THREAD_LIMIT=2
+    else
+        THREAD_LIMIT=$((CPU_CORES < 4 ? CPU_CORES : 4))
+    fi
+
+    # Strategy memory limit based on RAM
+    # <3GB: 256MB | 3-6GB: 512MB | 6GB+: 1024MB
+    if [ $TOTAL_RAM_MB -lt 3000 ]; then
+        STRATEGY_MEM_LIMIT=256
+    elif [ $TOTAL_RAM_MB -lt 6000 ]; then
+        STRATEGY_MEM_LIMIT=512
+    else
+        STRATEGY_MEM_LIMIT=1024
+    fi
+
+    log_info "System: ${TOTAL_RAM_MB}MB RAM, ${CPU_CORES} cores"
+    log_info "Config: shm=${SHM_SIZE_MB}MB, threads=${THREAD_LIMIT}, strategy_mem=${STRATEGY_MEM_LIMIT}MB"
+
     # Run container
     log_info "Starting container..."
     if docker run -d \
         --name "$CONTAINER" \
+        --shm-size=${SHM_SIZE_MB}m \
         -p 5000:5000 \
         -p 8765:8765 \
+        -e "OPENBLAS_NUM_THREADS=${THREAD_LIMIT}" \
+        -e "OMP_NUM_THREADS=${THREAD_LIMIT}" \
+        -e "MKL_NUM_THREADS=${THREAD_LIMIT}" \
+        -e "NUMEXPR_NUM_THREADS=${THREAD_LIMIT}" \
+        -e "NUMBA_NUM_THREADS=${THREAD_LIMIT}" \
+        -e "STRATEGY_MEMORY_LIMIT_MB=${STRATEGY_MEM_LIMIT}" \
+        -e "TZ=Asia/Kolkata" \
         -v "$OPENALGO_DIR/db:/app/db" \
         -v "$OPENALGO_DIR/strategies:/app/strategies" \
         -v "$OPENALGO_DIR/log:/app/log" \
+        -v "$OPENALGO_DIR/keys:/app/keys" \
+        -v "$OPENALGO_DIR/tmp:/app/tmp" \
         -v "$OPENALGO_DIR/.env:/app/.env:ro" \
         --restart unless-stopped \
         "$IMAGE"; then
